@@ -27,7 +27,26 @@ jobs:
           asset_path: target/release/SyntaxPlayerLauncher.exe
           asset_name: SyntaxPlayerLauncher.exe
           asset_content_type: application/octet-stream
-  
+
+  build-release-macos:
+    name: Build on macOS ${{ github.event.release.tag_name }}
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build Subter Launcher.app
+        run: ./mac-build-release.sh
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: target/macos/SubterMacLauncher.zip
+          asset_name: SubterMacLauncher.zip
+          asset_content_type: application/zip
+
   build-release-linux:
     name: Build on Linux ${{ github.event.release.tag_name }}
     runs-on: ubuntu-latest

@@ -19,6 +19,9 @@ use std::io::prelude::*;
 #[cfg(not(target_os = "windows"))]
 use std::os::unix::fs::FileExt;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 fn info( message : &str ) {
     let time = chrono::Local::now().format("%H:%M:%S").to_string();
     println!("[{}] [{}] {}", time.bold().blue(), "INFO".bold().green(), message);
@@ -122,48 +125,28 @@ pub async fn get_sha1_hash_of_file( path: &PathBuf ) -> String {
 }
 
 fn get_installation_directory() -> PathBuf {
-    return PathBuf::from(data_local_dir().unwrap().to_str().unwrap()).join("Syntax");
+    return PathBuf::from(data_local_dir().unwrap().to_str().unwrap()).join("Subter");
 }
 
-#[tokio::main]
-async fn main() {
-
-    // Clear the terminal before printing the startup text
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-        .args(&["/c", "cls"])
-        .spawn()
-        .expect("cls command failed to start")
-        .wait()
-        .expect("failed to wait");
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::process::Command::new("clear").spawn().unwrap();
-    }
-
-    let args: Vec<String> = std::env::args().collect();
-    let base_url : &str = "www.syntax.eco";
-    let mut setup_url : &str = "setup.syntax.eco";
-    let fallback_setup_url : &str = "d2f3pa9j0u8v6f.cloudfront.net";
-    let mut bootstrapper_filename :&str = "SyntaxPlayerLauncher.exe";
-    #[cfg(not(target_os = "windows"))]
-    {
-        bootstrapper_filename = "SyntaxPlayerLinuxLauncher";
-    }
+fn print_startup_text( base_url : &str ) {
     let build_date = include_str!(concat!(env!("OUT_DIR"), "/build_date.txt"));
-    let startup_text = format!("
-    .d8888b. Y88b   d88P  888b    888 88888888888     d8888 Y88b   d88P 
-    d88P  Y88b Y88b d88P  8888b   888     888        d88888  Y88b d88P  
-    Y88b.       Y88o88P   88888b  888     888       d88P888   Y88o88P   
-     \"Y888b.     Y888P    888Y88b 888     888      d88P 888    Y888P    
-        \"Y88b.    888     888 Y88b888     888     d88P  888    d888b    
-          \"888    888     888  Y88888     888    d88P   888   d88888b   
-    Y88b  d88P    888     888   Y8888     888   d8888888888  d88P Y88b  
-    \"Y8888P\"     888     888    Y888     888  d88P     888 d88P   Y88b
-     
-   {} | Build Date: {} | Version: {}", base_url ,build_date, env!("CARGO_PKG_VERSION"));
+    let art = r"  ______   __    __  _______  ________  ________  _______
+ /      \ |  \  |  \|       \|        \|        \|       \
+|  $$$$$$\| $$  | $$| $$$$$$$\\$$$$$$$$| $$$$$$$$| $$$$$$$\
+| $$___\$$| $$  | $$| $$__/ $$  | $$   | $$__    | $$__| $$
+ \$$    \ | $$  | $$| $$    $$  | $$   | $$  \   | $$    $$
+ _\$$$$$$\| $$  | $$| $$$$$$$\  | $$   | $$$$$   | $$$$$$$\
+|  \__| $$| $$__/ $$| $$__/ $$  | $$   | $$_____ | $$  | $$
+ \$$    $$ \$$    $$| $$    $$  | $$   | $$     \| $$  | $$
+  \$$$$$$   \$$$$$$  \$$$$$$$    \$$    \$$$$$$$$ \$$   \$$";
+
+    // Pad every art line to the same width so centering keeps them aligned
+    let art_width = art.lines().map(|line| line.len()).max().unwrap_or(0);
+    let mut startup_text = String::from("\n");
+    for line in art.lines() {
+        startup_text.push_str(&format!("{:<width$}\n", line, width = art_width));
+    }
+    startup_text.push_str(&format!(" \n{} | Build Date: {} | Version: {}", base_url, build_date, env!("CARGO_PKG_VERSION")));
 
     // Format the startup text to be centered
     let mut terminal_width = 80;
@@ -171,7 +154,7 @@ async fn main() {
         terminal_width = w;
     }
     if terminal_width < 80 {
-        print!("{}\n", format!("SYNTAX Bootstrapper | {} | Build Date: {} | Version: {}", base_url, build_date, env!("CARGO_PKG_VERSION")).to_string().magenta().cyan().italic().on_black()); // Fallback message
+        print!("{}\n", format!("Subter Bootstrapper | {} | Build Date: {} | Version: {}", base_url, build_date, env!("CARGO_PKG_VERSION")).to_string().magenta().cyan().italic().on_black()); // Fallback message
     } else {
         let startup_text_lines = startup_text.lines().collect::<Vec<&str>>();
         //println!("{}", startup_text.bold().blue().on_black());
@@ -189,6 +172,43 @@ async fn main() {
         let last_line = format!("{}{}", " ".repeat(spaces), last_line);
         println!("{}\n", last_line.magenta().cyan().italic().on_black());
     }
+}
+
+#[tokio::main]
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
+async fn main() {
+    // macOS has its own flow (app bundle, native Mac clients), see macos.rs
+    #[cfg(target_os = "macos")]
+    {
+        macos::main(std::env::args().collect()).await;
+        return;
+    }
+
+    // Clear the terminal before printing the startup text
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+        .args(&["/c", "cls"])
+        .spawn()
+        .expect("cls command failed to start")
+        .wait()
+        .expect("failed to wait");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("clear").spawn().unwrap();
+    }
+
+    let args: Vec<String> = std::env::args().collect();
+    let base_url : &str = "www.subter.org";
+    let mut setup_url : &str = "setup.subter.org";
+    let fallback_setup_url : &str = "setup.subter.org";
+    let mut bootstrapper_filename :&str = "SubterPlayerLauncher.exe";
+    #[cfg(not(target_os = "windows"))]
+    {
+        bootstrapper_filename = "SubterPlayerLinuxLauncher";
+    }
+    print_startup_text(base_url);
 
     let http_client: Client = reqwest::Client::builder()
         .no_gzip()
@@ -290,18 +310,18 @@ async fn main() {
                 std::process::Command::new("chmod").arg("+x").arg(latest_bootstrapper_path.to_str().unwrap()).spawn().unwrap();
 
                 let desktop_file_content = &format!("[Desktop Entry]
-Name=Syntax Launcher
+Name=Subter Launcher
 Exec={} %u
 Icon={}
 Type=Application
 Terminal=true
 Version={}
-MimeType=x-scheme-handler/syntax-player;", latest_bootstrapper_path.to_str().unwrap(), latest_bootstrapper_path.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
+MimeType=x-scheme-handler/subter-player;", latest_bootstrapper_path.to_str().unwrap(), latest_bootstrapper_path.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
                 
-                let desktop_file_path = dirs::data_local_dir().unwrap().join("applications").join("syntax-player.desktop");
+                let desktop_file_path = dirs::data_local_dir().unwrap().join("applications").join("subter-player.desktop");
                 std::fs::write(desktop_file_path, desktop_file_content).unwrap();
 
-                info("Please launch SYNTAX from the website, to continue with the update process.");
+                info("Please launch Subter from the website, to continue with the update process.");
                 std::thread::sleep(std::time::Duration::from_secs(20));
             }
             std::process::exit(0);
@@ -366,35 +386,35 @@ MimeType=x-scheme-handler/syntax-player;", latest_bootstrapper_path.to_str().unw
         info("Finished extracting files, cleaning up.");
         std::fs::remove_dir_all(&temp_downloads_directory).unwrap();
 
-        // Install the syntax-player scheme in the registry
-        info("Installing syntax-player scheme");
+        // Install the subter-player scheme in the registry
+        info("Installing subter-player scheme");
         #[cfg(target_os = "windows")]
         {
             let hkey_current_user = RegKey::predef(HKEY_CURRENT_USER);
             let hkey_classes_root : RegKey = hkey_current_user.open_subkey("Software\\Classes").unwrap();
-            let hkey_syntax_player = hkey_classes_root.create_subkey("syntax-player").unwrap().0;
-            let hkey_syntax_player_shell = hkey_syntax_player.create_subkey("shell").unwrap().0;
-            let hkey_syntax_player_shell_open = hkey_syntax_player_shell.create_subkey("open").unwrap().0;
-            let hkey_syntax_player_shell_open_command = hkey_syntax_player_shell_open.create_subkey("command").unwrap().0;
-            let defaulticon = hkey_syntax_player.create_subkey("DefaultIcon").unwrap().0;
-            hkey_syntax_player_shell_open_command.set_value("", &format!("\"{}\" \"%1\"", latest_bootstrapper_path.to_str().unwrap())).unwrap();
+            let hkey_Subter_player = hkey_classes_root.create_subkey("subter-player").unwrap().0;
+            let hkey_Subter_player_shell = hkey_Subter_player.create_subkey("shell").unwrap().0;
+            let hkey_Subter_player_shell_open = hkey_Subter_player_shell.create_subkey("open").unwrap().0;
+            let hkey_Subter_player_shell_open_command = hkey_Subter_player_shell_open.create_subkey("command").unwrap().0;
+            let defaulticon = hkey_Subter_player.create_subkey("DefaultIcon").unwrap().0;
+            hkey_Subter_player_shell_open_command.set_value("", &format!("\"{}\" \"%1\"", latest_bootstrapper_path.to_str().unwrap())).unwrap();
             defaulticon.set_value("", &format!("\"{}\",0", latest_bootstrapper_path.to_str().unwrap())).unwrap();
-            hkey_syntax_player.set_value("", &format!("URL: Syntax Protocol")).unwrap();
-            hkey_syntax_player.set_value("URL Protocol", &"").unwrap();
+            hkey_Subter_player.set_value("", &format!("URL: Subter Protocol")).unwrap();
+            hkey_Subter_player.set_value("URL Protocol", &"").unwrap();
         }
         #[cfg(not(target_os = "windows"))]
         {
             // Linux support
             let desktop_file_content = &format!("[Desktop Entry]
-Name=Syntax Launcher
+Name=Subter Launcher
 Exec={} %u
 Icon={}
 Type=Application
 Terminal=true
 Version={}
-MimeType=x-scheme-handler/syntax-player;", latest_bootstrapper_path.to_str().unwrap(), latest_bootstrapper_path.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
+MimeType=x-scheme-handler/subter-player;", latest_bootstrapper_path.to_str().unwrap(), latest_bootstrapper_path.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
             
-            let desktop_file_path = dirs::data_local_dir().unwrap().join("applications").join("syntax-player.desktop");
+            let desktop_file_path = dirs::data_local_dir().unwrap().join("applications").join("subter-player.desktop");
             std::fs::write(desktop_file_path, desktop_file_content).unwrap();
         }
 
@@ -421,24 +441,24 @@ MimeType=x-scheme-handler/syntax-player;", latest_bootstrapper_path.to_str().unw
     }
 
     // Parse the arguments passed to the bootstrapper
-    // Looks something like "syntax-player://1+launchmode:play+gameinfo:TICKET+placelauncherurl:https://www.syntax.eco/Game/placelauncher.ashx?placeId=660&t=TICKET+k:l"
+    // Looks something like "subter-player://1+launchmode:play+gameinfo:TICKET+placelauncherurl:https://www.subter.org/Game/placelauncher.ashx?placeId=660&t=TICKET+k:l"
     debug(&format!("Arguments Passed: {}", args.join(" ").bright_blue()));
     if args.len() == 1 {
         // Just open the website
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("cmd").arg("/c").arg("start").arg("https://www.syntax.eco/games").spawn().unwrap();
+            std::process::Command::new("cmd").arg("/c").arg("start").arg("https://www.subter.org/games").spawn().unwrap();
             std::process::exit(0);
         }
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new("xdg-open").arg("https://www.syntax.eco/games").spawn().unwrap();
+            std::process::Command::new("xdg-open").arg("https://www.subter.org/games").spawn().unwrap();
             std::process::exit(0);
         }
     }
 
     let main_args = &args[1];
-    let main_args = main_args.replace("syntax-player://", "");
+    let main_args = main_args.replace("subter-player://", "");
     let main_args = main_args.split("+").collect::<Vec<&str>>();
 
     let mut launch_mode = String::new();
@@ -489,28 +509,28 @@ MimeType=x-scheme-handler/syntax-player;", latest_bootstrapper_path.to_str().unw
     let client_executable_path : PathBuf;
     debug(&client_year.to_string());
     if client_year == "2018" {
-        client_executable_path = current_version_directory.join("Client2018").join("SyntaxPlayerBeta.exe");
+        client_executable_path = current_version_directory.join("Client2018").join("SubterPlayerBeta.exe");
     } else if client_year == "2020" {
-        client_executable_path = current_version_directory.join("Client2020").join("SyntaxPlayerBeta.exe");
+        client_executable_path = current_version_directory.join("Client2020").join("SubterPlayerBeta.exe");
     } else if client_year == "2014" {
-        client_executable_path = current_version_directory.join("Client2014").join("SyntaxPlayerBeta.exe");
+        client_executable_path = current_version_directory.join("Client2014").join("SubterPlayerBeta.exe");
     } else if client_year == "2021" {
-        client_executable_path = current_version_directory.join("Client2021").join("SyntaxPlayerBeta.exe");
+        client_executable_path = current_version_directory.join("Client2021").join("SubterPlayerBeta.exe");
     } else {
-        client_executable_path = current_version_directory.join("Client2016").join("SyntaxPlayerBeta.exe");
+        client_executable_path = current_version_directory.join("Client2016").join("SubterPlayerBeta.exe");
     }
     if !client_executable_path.exists() {
         // Delete AppSettings.xml so the bootstrapper will download the client again
         let app_settings_path = current_version_directory.join("AppSettings.xml");
         std::fs::remove_file(app_settings_path).unwrap();
 
-        error("Failed to run SyntaxPlayerBeta.exe, is your antivirus removing it? The bootstrapper will attempt to redownload the client on next launch.");
+        error("Failed to run SubterPlayerBeta.exe, is your antivirus removing it? The bootstrapper will attempt to redownload the client on next launch.");
         std::thread::sleep(std::time::Duration::from_secs(20));
         std::process::exit(0);
     }
     match launch_mode.as_str() {
         "play" => {
-            info("Launching SYNTAX");
+            info("Launching Subter");
             #[cfg(target_os = "windows")]
             {           
                 let mut command = std::process::Command::new(client_executable_path);
