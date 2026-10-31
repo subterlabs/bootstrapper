@@ -1,4 +1,4 @@
-use super::{create_folder_if_not_exists, debug, download_file, error, http_get, info, print_startup_text};
+use super::{create_folder_if_not_exists, debug, download_file, http_get, info, print_startup_text, ui};
 use colored::*;
 use reqwest::Client;
 use std::os::unix::process::CommandExt;
@@ -11,27 +11,56 @@ const URL_SCHEME: &str = "subter-player";
 
 pub async fn main(args: Vec<String>) {
     if args.get(1).map(String::as_str) == Some("--console") {
-        run_console(args.get(2).cloned().unwrap_or_default()).await;
+        run(args.get(2).cloned().unwrap_or_default()).await;
     } else if let Some(url) = args.get(1).filter(|a| a.starts_with(URL_SCHEME)) {
-        run_console(url.clone()).await;
+        app::run(Some(url.clone()));
     } else {
-        receive_url_and_open_terminal();
+        app::run(None);
     }
 }
 
+// The installer window: logo, status text, green progress bar and a Cancel button.
+// The install runs on a worker thread and the window polls ui.rs on a timer.
 mod app {
+    use super::super::ui;
     use objc2::rc::Retained;
-    use objc2::runtime::ProtocolObject;
-    use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
-    use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSURL};
+    use objc2::runtime::{AnyObject, ProtocolObject};
+    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
+        NSApplicationDelegate, NSBackingStoreType, NSButton, NSColor, NSFont, NSImage, NSImageScaling, NSImageView,
+        NSProgressIndicator, NSProgressIndicatorStyle, NSTextAlignment, NSTextField, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSArray, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer, NSURL};
+    use std::cell::{OnceCell, RefCell};
 
     const URL_WAIT_SECONDS: f64 = 1.5;
+    const WIDTH: f64 = 500.0;
+    const HEIGHT: f64 = 290.0;
+    const LOGO_SIZE: f64 = 100.0;
+    const BAR_X: f64 = 24.0;
+    const LOGO: &[u8] = include_bytes!("../assets/Bootstrapper.ico");
+
+    struct Views {
+        // Kept so the window stays alive
+        _window: Retained<NSWindow>,
+        label: Retained<NSTextField>,
+        bar: Retained<NSProgressIndicator>,
+        button: Retained<NSButton>,
+    }
+
+    #[derive(Default)]
+    struct Ivars {
+        url: RefCell<Option<String>>,
+        views: OnceCell<Views>,
+        state: RefCell<Option<ui::State>>,
+    }
 
     define_class!(
         #[unsafe(super(NSObject))]
         #[thread_kind = MainThreadOnly]
         #[name = "SubterLauncherDelegate"]
+        #[ivars = Ivars]
         struct Delegate;
 
         unsafe impl NSObjectProtocol for Delegate {}
@@ -44,12 +73,15 @@ mod app {
                     .and_then(|url| url.absoluteString())
                     .map(|url| url.to_string())
                     .unwrap_or_default();
-                super::open_console_in_terminal(&url);
-                quit();
+                self.start(url);
             }
 
             #[unsafe(method(applicationDidFinishLaunching:))]
             fn did_finish_launching(&self, _notification: &NSNotification) {
+                if let Some(url) = self.ivars().url.take() {
+                    self.start(url);
+                    return;
+                }
                 unsafe {
                     let _: () = msg_send![
                         self,
@@ -61,55 +93,156 @@ mod app {
             }
         }
 
+        unsafe impl NSWindowDelegate for Delegate {
+            #[unsafe(method(windowWillClose:))]
+            fn window_will_close(&self, _notification: &NSNotification) {
+                std::process::exit(0);
+            }
+        }
+
         impl Delegate {
             #[unsafe(method(launchedWithoutURL))]
             fn launched_without_url(&self) {
-                super::open_console_in_terminal("");
-                quit();
+                if self.ivars().views.get().is_none() {
+                    super::open_games_page();
+                    std::process::exit(0);
+                }
+            }
+
+            #[unsafe(method(cancel:))]
+            fn cancel(&self, _sender: &AnyObject) {
+                std::process::exit(0);
+            }
+
+            #[unsafe(method(tick:))]
+            fn tick(&self, _timer: &NSTimer) {
+                self.update();
             }
         }
     );
 
-    fn quit() {
-        std::process::exit(0);
+    impl Delegate {
+        // Shows the window and starts installing/launching, once per process
+        fn start(&self, url: String) {
+            if self.ivars().views.get().is_some() {
+                return;
+            }
+            let mtm = self.mtm();
+            ui::set_windowed();
+            ui::status("Connecting to Subter...");
+            let _ = self.ivars().views.set(self.build_window(mtm));
+            self.update();
+            unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.03, self, sel!(tick:), None, true);
+            }
+            std::thread::spawn(move || super::super::tokio_runtime().block_on(super::run(url)));
+        }
+
+        fn build_window(&self, mtm: MainThreadMarker) -> Views {
+            let app = NSApplication::sharedApplication(mtm);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, HEIGHT)),
+                    NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.setTitle(&NSString::from_str("Subter"));
+            // Always dark, like the Windows window
+            window.setAppearance(NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref());
+            window.setDelegate(Some(ProtocolObject::from_ref(self)));
+            let content = window.contentView().unwrap();
+
+            let logo = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(LOGO)).unwrap();
+            let logo_view = NSImageView::imageViewWithImage(&logo, mtm);
+            logo_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+            logo_view.setFrame(frame((WIDTH - LOGO_SIZE) / 2.0, 24.0, LOGO_SIZE, LOGO_SIZE));
+            content.addSubview(&logo_view);
+
+            let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+            label.setAlignment(NSTextAlignment::Center);
+            label.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+            label.setTextColor(Some(&NSColor::labelColor()));
+            label.setFrame(frame(16.0, 140.0, WIDTH - 32.0, 44.0));
+            content.addSubview(&label);
+
+            let bar = NSProgressIndicator::new(mtm);
+            bar.setStyle(NSProgressIndicatorStyle::Bar);
+            bar.setMinValue(0.0);
+            bar.setMaxValue(1.0);
+            bar.setFrame(frame(BAR_X, 192.0, WIDTH - BAR_X * 2.0, 20.0));
+            content.addSubview(&bar);
+
+            let button = unsafe {
+                NSButton::buttonWithTitle_target_action(&NSString::from_str("Cancel"), Some(self), Some(sel!(cancel:)), mtm)
+            };
+            button.setFrame(frame((WIDTH - 130.0) / 2.0, 232.0, 130.0, 34.0));
+            button.setKeyEquivalent(&NSString::from_str("\u{1b}"));
+            content.addSubview(&button);
+
+            window.center();
+            window.makeKeyAndOrderFront(None);
+            unsafe {
+                let _: () = msg_send![&*app, activateIgnoringOtherApps: true];
+            }
+            Views { _window: window, label, bar, button }
+        }
+
+        fn update(&self) {
+            let Some(views) = self.ivars().views.get() else { return };
+            let state = ui::snapshot();
+            let mut last = self.ivars().state.borrow_mut();
+            if last.as_ref() == Some(&state) {
+                return;
+            }
+            if last.as_ref().map(|s| &s.status) != Some(&state.status) {
+                views.label.setStringValue(&NSString::from_str(&state.status));
+            }
+            if state.failed && !last.as_ref().is_some_and(|s| s.failed) {
+                views.label.setTextColor(Some(&NSColor::systemRedColor()));
+                views.button.setTitle(&NSString::from_str("Close"));
+            }
+
+            views.bar.setHidden(state.failed);
+            match state.progress {
+                Some(fraction) => {
+                    unsafe { views.bar.stopAnimation(None) };
+                    views.bar.setIndeterminate(false);
+                    views.bar.setDoubleValue(fraction);
+                }
+                None => {
+                    views.bar.setIndeterminate(true);
+                    unsafe { views.bar.startAnimation(None) };
+                }
+            }
+            *last = Some(state);
+        }
     }
 
-    pub fn run() {
+    // Layout is written top-down like the Windows window, AppKit counts from the bottom
+    fn frame(x: f64, top: f64, width: f64, height: f64) -> NSRect {
+        NSRect::new(NSPoint::new(x, HEIGHT - top - height), NSSize::new(width, height))
+    }
+
+    pub fn run(url: Option<String>) {
         let mtm = MainThreadMarker::new().expect("must run on the main thread");
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
-        let delegate: Retained<Delegate> = unsafe { msg_send![Delegate::alloc(mtm), init] };
+        let delegate = Delegate::alloc(mtm).set_ivars(Ivars { url: RefCell::new(url), ..Default::default() });
+        let delegate: Retained<Delegate> = unsafe { msg_send![super(delegate), init] };
         app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         app.run();
     }
+
 }
 
-fn receive_url_and_open_terminal() {
-    app::run();
-}
-
-fn open_console_in_terminal(url: &str) {
-    let exe = std::env::current_exe().unwrap();
-    let script_dir = get_installation_directory().join("Launch");
-    std::fs::create_dir_all(&script_dir).unwrap();
-    let script_path = script_dir.join(format!("launch-{}.command", std::process::id()));
-    let script = format!(
-        "#!/bin/bash\nrm -f -- \"$0\"\nclear\n{} --console {}\nstatus=$?\n[ $status -ne 0 ] && read -r -p \"Press Return to close...\"\nexit $status\n",
-        shell_quote(exe.to_str().unwrap()),
-        shell_quote(url)
-    );
-    std::fs::write(&script_path, script).unwrap();
-    set_permissions(&script_path, 0o700);
-    let _ = Command::new("open").arg("-a").arg("Terminal").arg(&script_path).status();
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn set_permissions(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+fn open_games_page() {
+    let _ = Command::new("open").arg(format!("https://{}/games", BASE_URL)).status();
 }
 
 fn get_installation_directory() -> PathBuf {
@@ -160,23 +293,22 @@ fn client_for_year(year: &str) -> Option<MacClient> {
     }
 }
 
-async fn run_console(url: String) {
+async fn run(url: String) {
     print_startup_text(BASE_URL);
 
     if url.is_empty() {
         info("Opening the games page. Click Play on a game to launch it.");
-        let _ = Command::new("open").arg(format!("https://{}/games", BASE_URL)).status();
-        close_terminal_window();
+        open_games_page();
         return;
     }
 
     let launch = parse_launch_url(&url);
     if launch.launch_mode != "play" {
-        fail("Unknown launch mode, exiting.");
+        ui::fail("Unknown launch mode, exiting.");
     }
     let client = match client_for_year(&launch.client_year) {
         Some(client) => client,
-        None => fail(&format!(
+        None => ui::fail(&format!(
             "{} games are not available on Mac yet. Supported years: 2016, 2018, 2021.",
             if launch.client_year.is_empty() { "This year's" } else { &launch.client_year }
         )),
@@ -185,7 +317,7 @@ async fn run_console(url: String) {
     let http_client: Client = reqwest::Client::builder().no_gzip().build().unwrap();
     let latest_client_version = match http_get(&http_client, &format!("https://{}/version", SETUP_URL)).await {
         Ok(version) => version.trim().to_string(),
-        Err(e) => fail(&format!(
+        Err(e) => ui::fail(&format!(
             "Failed to fetch the latest client version: [{}], are you connected to the internet?",
             e.to_string().bright_red()
         )),
@@ -214,7 +346,9 @@ async fn run_console(url: String) {
         MacClient::Native { .. } => launch_native(&client_directory, &launch, &log_directory),
         MacClient::Wine { exe, .. } => launch_wine(&installation_directory, &client_directory.join(exe), &launch, &log_directory),
     }
-    close_terminal_window();
+    // Leave "Starting Subter..." up while the client opens its window
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    std::process::exit(0);
 }
 
 fn detach_from_terminal(command: &mut Command) -> &mut Command {
@@ -226,39 +360,6 @@ fn detach_from_terminal(command: &mut Command) -> &mut Command {
     }
 }
 
-fn close_terminal_window() {
-    let tty = unsafe {
-        let name = libc::ttyname(0);
-        if name.is_null() {
-            return;
-        }
-        std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned()
-    };
-    let script = format!(
-        "delay 1\n\
-         tell application \"Terminal\"\n\
-         repeat with w in windows\n\
-         repeat with t in tabs of w\n\
-         if tty of t is \"{}\" then\n\
-         close w\n\
-         return\n\
-         end if\n\
-         end repeat\n\
-         end repeat\n\
-         end tell",
-        tty
-    );
-    let _ = detach_from_terminal(Command::new("osascript").arg("-e").arg(script))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-}
-
-fn fail(message: &str) -> ! {
-    error(message);
-    std::process::exit(1);
-}
 
 async fn install_client_if_needed(http_client: &Client, version: &str, zip_name: &str, client_directory: &Path, downloads_directory: &Path) {
     let installed_marker = client_directory.join(".installed");
@@ -271,22 +372,25 @@ async fn install_client_if_needed(http_client: &Client, version: &str, zip_name:
     }
 
     info("Downloading the client, this may take a while.");
+    ui::status("Downloading Subter...");
+    ui::progress(0.0);
     let zip_path = downloads_directory.join(zip_name);
     let zip_url = format!("https://{}/{}-{}", SETUP_URL, version, zip_name);
     match http_client.head(&zip_url).send().await {
         Ok(response) if response.status().is_success() => {}
-        Ok(response) => fail(&format!("The Mac client is not available on the setup server ({} returned {}).", zip_url, response.status())),
-        Err(e) => fail(&format!("Failed to reach the setup server: {}", e)),
+        Ok(response) => ui::fail(&format!("The Mac client is not available on the setup server ({} returned {}).", zip_url, response.status())),
+        Err(e) => ui::fail(&format!("Failed to reach the setup server: {}", e)),
     }
     download_file(http_client, &zip_url, &zip_path.to_path_buf()).await;
 
     info(&format!("Extracting {}", zip_name.bright_blue()));
+    ui::status("Installing Subter...");
     std::fs::create_dir_all(client_directory).unwrap();
     let status = Command::new("ditto").arg("-x").arg("-k").arg(&zip_path).arg(client_directory).status().unwrap();
     let _ = std::fs::remove_file(&zip_path);
     if !status.success() {
         let _ = std::fs::remove_dir_all(client_directory);
-        fail("Failed to extract the client, please try again.");
+        ui::fail("Failed to extract the client, please try again.");
     }
     std::fs::write(installed_marker, version).unwrap();
     info("Client installed.");
@@ -306,9 +410,11 @@ fn launch_native(client_directory: &Path, launch: &LaunchInfo, log_directory: &P
     let player = client_directory.join("RobloxPlayer.app/Contents/MacOS/RobloxPlayer");
     if !player.exists() {
         let _ = std::fs::remove_file(client_directory.join(".installed"));
-        fail("The client is missing RobloxPlayer, it will be downloaded again on next launch.");
+        ui::fail("The client is missing RobloxPlayer, it will be downloaded again on next launch.");
     }
     info("Launching SUBTER");
+    ui::status("Starting Subter...");
+    ui::progress(1.0);
     let log = std::fs::File::create(log_directory.join("player.log")).unwrap();
     detach_from_terminal(&mut Command::new(&player))
         .args([
@@ -323,7 +429,7 @@ fn launch_native(client_directory: &Path, launch: &LaunchInfo, log_directory: &P
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
-        .unwrap_or_else(|e| fail(&format!("Failed to start the client: {}", e)));
+        .unwrap_or_else(|e| ui::fail(&format!("Failed to start the client: {}", e)));
 }
 
 fn find_wine(installation_directory: &Path) -> Option<(PathBuf, Vec<(String, String)>, Vec<String>)> {
@@ -396,17 +502,19 @@ fn find_whisky_bottle(home: &Path) -> Option<PathBuf> {
 fn launch_wine(installation_directory: &Path, exe: &Path, launch: &LaunchInfo, log_directory: &Path) {
     if !exe.exists() {
         let _ = std::fs::remove_file(exe.parent().unwrap().join(".installed"));
-        fail("The client is missing SubterPlayerBeta.exe, it will be downloaded again on next launch.");
+        ui::fail("The client is missing SubterPlayerBeta.exe, it will be downloaded again on next launch.");
     }
     let (wine, env, wine_args) = match find_wine(installation_directory) {
         Some(wine) => wine,
-        None => fail(&format!(
+        None => ui::fail(&format!(
             "2016 games need Wine on Mac. Install Whisky (https://getwhisky.app) or CrossOver and create a bottle, or put the path to a wine binary in {}",
             installation_directory.join("winepath.txt").display()
         )),
     };
 
     info("Launching SUBTER through Wine");
+    ui::status("Starting Subter...");
+    ui::progress(1.0);
     let log = std::fs::File::create(log_directory.join("player-wine.log")).unwrap();
     detach_from_terminal(&mut Command::new(&wine))
         .envs(env)
@@ -425,7 +533,7 @@ fn launch_wine(installation_directory: &Path, exe: &Path, launch: &LaunchInfo, l
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
-        .unwrap_or_else(|e| fail(&format!("Failed to start Wine ({}): {}", wine.display(), e)));
+        .unwrap_or_else(|e| ui::fail(&format!("Failed to start Wine ({}): {}", wine.display(), e)));
 }
 
 #[cfg(test)]

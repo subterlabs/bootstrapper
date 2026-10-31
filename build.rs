@@ -13,6 +13,14 @@ fn main() {
     if env::var_os("CARGO_CFG_WINDOWS").is_some() {
         // Add a version resource to the executable
         let mut res = WindowsResource::new();
+        if !cfg!(windows) && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+            let prefix = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+                Ok("x86") => "i686-w64-mingw32",
+                _ => "x86_64-w64-mingw32",
+            };
+            res.set_windres_path(&format!("{}-windres", prefix));
+            res.set_ar_path(&format!("{}-ar", prefix));
+        }
         res.set_icon("assets/Bootstrapper.ico");
         res.set_language(0x0409); // US English
         res.set("FileVersion", env!("CARGO_PKG_VERSION"));
@@ -24,6 +32,9 @@ fn main() {
         res.set("CompanyName", "SYNTAX Corporation");
         res.set("LegalCopyright", "Copyright (c) 2023");
         res.compile().unwrap();
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+            println!("cargo:rustc-link-arg-bins={}/resource.o", out_dir);
+        }
     }
 
     println!("cargo:rerun-if-changed=build.rs");

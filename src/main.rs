@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use chrono::format;
 use colored::*;
 use std::path::PathBuf;
@@ -21,6 +23,9 @@ use std::os::unix::fs::FileExt;
 
 #[cfg(target_os = "macos")]
 mod macos;
+mod ui;
+#[cfg(target_os = "windows")]
+mod ui_windows;
 
 fn info( message : &str ) {
     let time = chrono::Local::now().format("%H:%M:%S").to_string();
@@ -93,6 +98,7 @@ pub async fn download_file( client: &Client, url: &str, path: &PathBuf ) {
         let new = std::cmp::min(downloaded + (chunk.len() as u64), content_length);
         downloaded = new;
         progress_bar.set_position(new);
+        ui::download_progress(new, content_length);
     }
     progress_bar.finish();
     info(format!("Finished downloading {}", url.green()).as_str());
@@ -174,30 +180,35 @@ fn print_startup_text( base_url : &str ) {
     }
 }
 
-#[tokio::main]
-#[cfg_attr(target_os = "macos", allow(unreachable_code))]
-async fn main() {
+fn tokio_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
+}
+
+fn main() {
     // macOS has its own flow (app bundle, native Mac clients), see macos.rs
     #[cfg(target_os = "macos")]
-    {
-        macos::main(std::env::args().collect()).await;
-        return;
-    }
+    tokio_runtime().block_on(macos::main(std::env::args().collect()));
 
-    // Clear the terminal before printing the startup text
+    // The window needs the main thread, so the bootstrapper runs on another one
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-        .args(&["/c", "cls"])
-        .spawn()
-        .expect("cls command failed to start")
-        .wait()
-        .expect("failed to wait");
+        ui::set_windowed();
+        std::thread::spawn(|| tokio_runtime().block_on(bootstrap()));
+        ui_windows::run();
     }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    tokio_runtime().block_on(bootstrap());
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+async fn bootstrap() {
+    // Clear the terminal before printing the startup text
     #[cfg(not(target_os = "windows"))]
     {
         std::process::Command::new("clear").spawn().unwrap();
     }
+    ui::status("Connecting to Subter...");
 
     let args: Vec<String> = std::env::args().collect();
     let base_url : &str = "www.subter.org";
@@ -235,9 +246,7 @@ async fn main() {
                     setup_url = fallback_setup_url;
                 },
                 Err(e) => {
-                    error(&format!("Failed to fetch latest client version from fallback setup server: {}, are you connected to the internet?", e));
-                    std::thread::sleep(std::time::Duration::from_secs(10));
-                    std::process::exit(0);
+                    ui::fail(&format!("Could not connect to Subter, are you connected to the internet? ({})", e));
                 }
             }
         }
@@ -271,6 +280,7 @@ async fn main() {
         // Check if the latest bootstrapper is downloaded
         if !latest_bootstrapper_path.exists() {
             info("Downloading the latest bootstrapper");
+            ui::status("Updating Subter...");
             // Download the latest bootstrapper
             download_file(&http_client, &format!("https://{}/{}-{}", setup_url, latest_client_version, bootstrapper_filename), &latest_bootstrapper_path).await;
         }
@@ -287,6 +297,7 @@ async fn main() {
 
         if latest_bootstrapper_hash != current_exe_hash {
             info("Starting latest bootstrapper");
+            ui::status("Starting Subter...");
             // Run the latest bootstrapper ( with the same arguments passed to us ) and exit
             #[cfg(target_os = "windows")]
             {
@@ -336,6 +347,7 @@ MimeType=x-scheme-handler/subter-player;", latest_bootstrapper_path.to_str().unw
     let app_settings_path = current_version_directory.join("AppSettings.xml");
     if !app_settings_path.exists() { //|| !client_executable_path.exists() {
         info("Downloading the latest client files, this may take a while.");
+        ui::status("Downloading Subter...");
         for entry in std::fs::read_dir(&current_version_directory).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
@@ -350,12 +362,18 @@ MimeType=x-scheme-handler/subter-player;", latest_bootstrapper_path.to_str().unw
 
         let VersionURLPrefix = format!("https://{}/{}-", setup_url, latest_client_version);
 
+        ui::segment(0, 5);
         let Client2018Zip : PathBuf = download_file_prefix(&http_client, format!("{}2018client.zip", VersionURLPrefix).as_str(), &temp_downloads_directory).await;
+        ui::segment(1, 5);
         let Client2020Zip : PathBuf = download_file_prefix(&http_client, format!("{}2020client.zip", VersionURLPrefix).as_str(), &temp_downloads_directory).await;
+        ui::segment(2, 5);
         let Client2014Zip : PathBuf = download_file_prefix(&http_client, format!("{}2014client.zip", VersionURLPrefix).as_str(), &temp_downloads_directory).await;
+        ui::segment(3, 5);
         let Client2016Zip : PathBuf = download_file_prefix(&http_client, format!("{}2016client.zip", VersionURLPrefix).as_str(), &temp_downloads_directory).await;
+        ui::segment(4, 5);
         let Client2021Zip : PathBuf = download_file_prefix(&http_client, format!("{}2021client.zip", VersionURLPrefix).as_str(), &temp_downloads_directory).await;
         info("Download finished, extracting files.");
+        ui::status("Installing Subter...");
 
         fn extract_to_dir( zip_file : &PathBuf, target_dir : &PathBuf ) {
             info(format!("Extracting {} to {}", zip_file.to_str().unwrap().bright_blue(), target_dir.to_str().unwrap().bright_blue()).as_str());
@@ -363,25 +381,31 @@ MimeType=x-scheme-handler/subter-player;", latest_bootstrapper_path.to_str().unw
             zip_extract::extract(zip_file_cursor, target_dir, false).unwrap();
         }
 
+        ui::progress(0.0);
         let client_2018_directory = current_version_directory.join("Client2018");
         create_folder_if_not_exists(&client_2018_directory).await;
         extract_to_dir(&Client2018Zip, &client_2018_directory);
+        ui::progress(1 as f64 / 5.0);
 
         let client_2020_directory = current_version_directory.join("Client2020");
         create_folder_if_not_exists(&client_2020_directory).await;
         extract_to_dir(&Client2020Zip, &client_2020_directory);
+        ui::progress(2 as f64 / 5.0);
 
         let client_2014_directory = current_version_directory.join("Client2014");
         create_folder_if_not_exists(&client_2014_directory).await;
         extract_to_dir(&Client2014Zip, &client_2014_directory);
+        ui::progress(3 as f64 / 5.0);
 
         let client_2016_directory = current_version_directory.join("Client2016");
         create_folder_if_not_exists(&client_2016_directory).await;
         extract_to_dir(&Client2016Zip, &client_2016_directory);
+        ui::progress(4 as f64 / 5.0);
 
         let client_2021_directory = current_version_directory.join("Client2021");
         create_folder_if_not_exists(&client_2021_directory).await;
         extract_to_dir(&Client2021Zip, &client_2021_directory);
+        ui::progress(5 as f64 / 5.0);
 
         info("Finished extracting files, cleaning up.");
         std::fs::remove_dir_all(&temp_downloads_directory).unwrap();
@@ -447,7 +471,9 @@ MimeType=x-scheme-handler/subter-player;", latest_bootstrapper_path.to_str().unw
         // Just open the website
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("cmd").arg("/c").arg("start").arg("https://www.subter.org/games").spawn().unwrap();
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            std::process::Command::new("cmd").arg("/c").arg("start").arg("https://www.subter.org/games").creation_flags(CREATE_NO_WINDOW).spawn().unwrap();
             std::process::exit(0);
         }
         #[cfg(not(target_os = "windows"))]
@@ -524,18 +550,20 @@ MimeType=x-scheme-handler/subter-player;", latest_bootstrapper_path.to_str().unw
         let app_settings_path = current_version_directory.join("AppSettings.xml");
         std::fs::remove_file(app_settings_path).unwrap();
 
-        error("Failed to run SubterPlayerBeta.exe, is your antivirus removing it? The bootstrapper will attempt to redownload the client on next launch.");
-        std::thread::sleep(std::time::Duration::from_secs(20));
-        std::process::exit(0);
+        ui::fail("Failed to run SubterPlayerBeta.exe, is your antivirus removing it? Subter will download it again on next launch.");
     }
     match launch_mode.as_str() {
         "play" => {
             info("Launching Subter");
+            ui::status("Starting Subter...");
+            ui::progress(1.0);
             #[cfg(target_os = "windows")]
             {           
                 let mut command = std::process::Command::new(client_executable_path);
                 command.args(&["--play","--authenticationUrl", format!("https://{}/Login/Negotiate.ashx", base_url).as_str(), "--authenticationTicket", authentication_ticket.as_str(), "--joinScriptUrl", format!("{}",join_script.as_str()).as_str()]);
-                command.spawn().unwrap();
+                if let Err(e) = command.spawn() {
+                    ui::fail(&format!("Failed to start Subter: {}", e));
+                }
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 std::process::exit(0);
             }
@@ -552,9 +580,7 @@ MimeType=x-scheme-handler/subter-player;", latest_bootstrapper_path.to_str().unw
             }
         },
         _ => {
-            error("Unknown launch mode, exiting.");
-            std::thread::sleep(std::time::Duration::from_secs(10));
-            std::process::exit(0);
+            ui::fail("Unknown launch mode, exiting.");
         }
     }
 }
